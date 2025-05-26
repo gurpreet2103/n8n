@@ -1,6 +1,8 @@
-const express = require('express');
-const axios = require('axios');
-const crypto = require('crypto');
+import express from 'express';
+import axios from 'axios';
+import crypto from 'crypto';
+import process from 'process';
+
 const app = express();
 const port = process.env.PORT || 8888;
 
@@ -24,10 +26,10 @@ app.post('/', async (req, res) => {
   const transmissionSig = req.headers['paypal-transmission-sig'];
   const webhookEventBody = req.rawBody;
 
-  // Step 1: Download PayPal cert
   try {
+    // Step 1: Download PayPal cert
     const { data: certPem } = await axios.get(certUrl);
-    
+
     // Step 2: Build expected signature string
     const expectedSig = `${transmissionId}|${transmissionTime}|${PAYPAL_WEBHOOK_ID}|${webhookEventBody}`;
 
@@ -52,5 +54,5 @@ app.post('/', async (req, res) => {
 });
 
 app.listen(port, () => {
-  console.log(`Node server listening at http://localhost:${port}/`);
+  console.log(`✅ Node server listening at http://localhost:${port}/`);
 });
