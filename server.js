@@ -1,83 +1,100 @@
-import express from 'express';
-import axios from 'axios';
-import dotenv from 'dotenv';
+import "dotenv/config";
+import express from "express";
+import crypto from "crypto";
+import { crc32 } from "crc";
+import fs from "fs/promises";
+import fetch from "node-fetch";
 
-dotenv.config();
-const app = express();
-const port = process.env.PORT || 8888;
+const {
+  LISTEN_PORT = 8888,
+  LISTEN_PATH = "/",
+  CACHE_DIR = ".",
+  WEBHOOK_ID = "<your-webhook-id-here>", // Replace this with your actual PayPal webhook ID
+} = process.env;
 
-const PAYPAL_WEBHOOK_ID = process.env.PAYPAL_WEBHOOK_ID; // safer from env
-
-app.use(express.json({
-  verify: (req, res, buf) => {
-    req.rawBody = buf;
+async function downloadAndCache(url, cacheKey) {
+  if (!cacheKey) {
+    cacheKey = url.replace(/\W+/g, "-");
   }
-}));
+  const filePath = `${CACHE_DIR}/${cacheKey}`;
 
-app.post('/webhook', async (req, res) => {
-  const headers = req.headers;
-
-  console.log('headers', headers);
-  console.log('parsed json', req.body);
-
-  try {
-    const verificationPayload = {
-      auth_algo: headers['paypal-auth-algo'],
-      cert_url: headers['paypal-cert-url'],
-      transmission_id: headers['paypal-transmission-id'],
-      transmission_sig: headers['paypal-transmission-sig'],
-      transmission_time: headers['paypal-transmission-time'],
-      webhook_id: PAYPAL_WEBHOOK_ID, // Your webhook ID from PayPal developer dashboard
-      webhook_event: req.body
-    };
-
-    const accessToken = await getAccessToken();
-
-    const response = await axios.post(
-      'https://api.paypal.com/v1/notifications/verify-webhook-signature',
-      verificationPayload,
-      {
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${accessToken}`
-        }
-      }
-    );
-
-    if (response.data.verification_status === 'SUCCESS') {
-      console.log('✅ Verified PayPal webhook');
-      res.sendStatus(200);
-    } else {
-      console.error('❌ Invalid webhook signature');
-      res.status(400).send('Invalid signature');
-    }
-  } catch (err) {
-    console.error('Error during verification', err.message);
-    res.status(500).send('Server error');
+  const cachedData = await fs.readFile(filePath, "utf-8").catch(() => null);
+  if (cachedData) {
+    return cachedData;
   }
-});
 
-// Step to get OAuth2 token from PayPal
-async function getAccessToken() {
-  const clientId = process.env.PAYPAL_CLIENT_ID;
-  const secret = process.env.PAYPAL_CLIENT_SECRET;
+  const response = await fetch(url);
+  const data = await response.text();
+  await fs.writeFile(filePath, data);
 
-  const auth = Buffer.from(`${clientId}:${secret}`).toString('base64');
-
-  const { data } = await axios.post(
-    'https://api.paypal.com/v1/oauth2/token',
-    'grant_type=client_credentials',
-    {
-      headers: {
-        Authorization: `Basic ${auth}`,
-        'Content-Type': 'application/x-www-form-urlencoded'
-      }
-    }
-  );
-
-  return data.access_token;
+  return data;
 }
 
-app.listen(port, () => {
-  console.log(`Listening on http://localhost:${port}`);
+const app = express();
+
+app.post(LISTEN_PATH, express.raw({ type: "application/json" }), async (request, response) => {
+  const headers = request.headers;
+  const event = request.body.toString(); // raw body as string
+
+  let data;
+  try {
+    data = JSON.parse(event);
+  } catch (err) {
+    console.error("Failed to parse JSON event:", err);
+    return response.sendStatus(400);
+  }
+
+  console.log(`headers`, headers);
+  console.log(`parsed json`, JSON.stringify(data, null, 2));
+  console.log(`raw event: ${event}`);
+
+  const isSignatureValid = await verifySignature(event, headers);
+
+  if (isSignatureValid) {
+    console.log("Signature is valid.");
+    // Process your webhook data here
+    console.log("Received event", JSON.stringify(data, null, 2));
+  } else {
+    console.log(`Signature is not valid for ${data?.id} ${headers?.["correlation-id"]}`);
+  }
+
+  response.sendStatus(200);
+});
+
+async function verifySignature(event, headers) {
+  const transmissionId = headers["paypal-transmission-id"];
+  const timeStamp = headers["paypal-transmission-time"];
+  const certUrl = headers["paypal-cert-url"];
+  const signature = headers["paypal-transmission-sig"];
+
+  if (!transmissionId || !timeStamp || !certUrl || !signature) {
+    console.error("Missing required PayPal headers for signature verification");
+    return false;
+  }
+
+  // Convert CRC32 to unsigned decimal string
+  const crc = (crc32(event) >>> 0).toString();
+
+  const message = `${transmissionId}|${timeStamp}|${WEBHOOK_ID}|${crc}`;
+  console.log(`Original signed message: ${message}`);
+
+  // Download and cache the PayPal public certificate
+  const certPem = await downloadAndCache(certUrl);
+
+  // Decode the signature from base64
+  const signatureBuffer = Buffer.from(signature, "base64");
+
+  const verifier = crypto.createVerify("SHA256");
+  verifier.update(message);
+
+  try {
+    return verifier.verify(certPem, signatureBuffer);
+  } catch (err) {
+    console.error("Error during signature verification:", err);
+    return false;
+  }
+}
+
+app.listen(LISTEN_PORT, () => {
+  console.log(`Node server listening at http://localhost:${LISTEN_PORT}/`);
 });
