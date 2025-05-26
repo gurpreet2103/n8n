@@ -1,14 +1,13 @@
 import express from 'express';
 import axios from 'axios';
-import crypto from 'crypto';
-import process from 'process';
+import dotenv from 'dotenv';
 
+dotenv.config();
 const app = express();
 const port = process.env.PORT || 8888;
 
-const PAYPAL_WEBHOOK_ID = 'WH-54M31324A08453805-0TT498265C515724R'; // Replace with your actual webhook ID
+const PAYPAL_WEBHOOK_ID = process.env.PAYPAL_WEBHOOK_ID; // safer from env
 
-// Capture raw body for signature verification
 app.use(express.json({
   verify: (req, res, buf) => {
     req.rawBody = buf;
@@ -16,43 +15,69 @@ app.use(express.json({
 }));
 
 app.post('/webhook', async (req, res) => {
-  console.log('headers', req.headers);
+  const headers = req.headers;
+
+  console.log('headers', headers);
   console.log('parsed json', req.body);
 
-  const transmissionId = req.headers['paypal-transmission-id'];
-  const transmissionTime = req.headers['paypal-transmission-time'];
-  const certUrl = req.headers['paypal-cert-url'];
-  const authAlgo = req.headers['paypal-auth-algo'];
-  const transmissionSig = req.headers['paypal-transmission-sig'];
-  const webhookEventBody = req.rawBody;
-
   try {
-    // Step 1: Download PayPal cert
-    const { data: certPem } = await axios.get(certUrl);
+    const verificationPayload = {
+      auth_algo: headers['paypal-auth-algo'],
+      cert_url: headers['paypal-cert-url'],
+      transmission_id: headers['paypal-transmission-id'],
+      transmission_sig: headers['paypal-transmission-sig'],
+      transmission_time: headers['paypal-transmission-time'],
+      webhook_id: PAYPAL_WEBHOOK_ID, // Your webhook ID from PayPal developer dashboard
+      webhook_event: req.body
+    };
 
-    // Step 2: Build expected signature string
-    const expectedSig = `${transmissionId}|${transmissionTime}|${PAYPAL_WEBHOOK_ID}|${webhookEventBody}`;
+    const accessToken = await getAccessToken();
 
-    // Step 3: Verify signature
-    const verifier = crypto.createVerify('RSA-SHA256');
-    verifier.update(expectedSig);
-    verifier.end();
+    const response = await axios.post(
+      'https://api.paypal.com/v1/notifications/verify-webhook-signature',
+      verificationPayload,
+      {
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${accessToken}`
+        }
+      }
+    );
 
-    const isValid = verifier.verify(certPem, transmissionSig, 'base64');
-
-    if (isValid) {
-      console.log('✅ Signature verified!');
+    if (response.data.verification_status === 'SUCCESS') {
+      console.log('✅ Verified PayPal webhook');
       res.sendStatus(200);
     } else {
-      console.error('❌ Signature verification failed.');
-      res.sendStatus(400);
+      console.error('❌ Invalid webhook signature');
+      res.status(400).send('Invalid signature');
     }
-  } catch (error) {
-    console.error('Error verifying signature:', error.message);
-    res.sendStatus(500);
+  } catch (err) {
+    console.error('Error during verification', err.message);
+    res.status(500).send('Server error');
   }
 });
 
+// Step to get OAuth2 token from PayPal
+async function getAccessToken() {
+  const clientId = process.env.PAYPAL_CLIENT_ID;
+  const secret = process.env.PAYPAL_CLIENT_SECRET;
+
+  const auth = Buffer.from(`${clientId}:${secret}`).toString('base64');
+
+  const { data } = await axios.post(
+    'https://api.paypal.com/v1/oauth2/token',
+    'grant_type=client_credentials',
+    {
+      headers: {
+        Authorization: `Basic ${auth}`,
+        'Content-Type': 'application/x-www-form-urlencoded'
+      }
+    }
+  );
+
+  return data.access_token;
+}
+
 app.listen(port, () => {
-  console.log(`✅ Node server listening at http://localhost:${port}/`);
+  console.log(`Listening on http://localhost:${port}`);
 });
