@@ -1,8 +1,9 @@
-// server.js
 import "dotenv/config";
 import express from "express";
+
 import crypto from "crypto";
-import crc32 from "buffer-crc32";
+import { crc32 } from "crc";  // <-- updated import
+
 import fs from "fs/promises";
 import fetch from "node-fetch";
 
@@ -10,53 +11,74 @@ const {
   LISTEN_PORT = 8888,
   LISTEN_PATH = "/",
   CACHE_DIR = ".",
-  WEBHOOK_ID,
+  WEBHOOK_ID = "<your-webhook-id-here>",
 } = process.env;
-if (!WEBHOOK_ID) {
-  console.error('Missing WEBHOOK_ID in environment');
-  process.exit(1);
-}
 
 async function downloadAndCache(url, cacheKey) {
-  cacheKey = cacheKey || url.replace(/\W+/g, '-');
+  if (!cacheKey) {
+    cacheKey = url.replace(/\W+/g, "-");
+  }
   const filePath = `${CACHE_DIR}/${cacheKey}`;
-  const cached = await fs.readFile(filePath, 'utf8').catch(() => null);
-  if (cached) return cached;
-  const res = await fetch(url);
-  const data = await res.text();
+
+  // Check if cached file exists
+  const cachedData = await fs.readFile(filePath, "utf-8").catch(() => null);
+  if (cachedData) {
+    return cachedData;
+  }
+
+  // Download the file if not cached
+  const response = await fetch(url);
+  const data = await response.text();
   await fs.writeFile(filePath, data);
+
   return data;
 }
 
 const app = express();
-app.post(LISTEN_PATH, express.raw({ type: 'application/json' }), async (req, res) => {
-  const headers = req.headers;
-  const raw = req.body.toString('utf8');
-  console.log('Headers:', headers);
-  console.log('Raw payload:', raw);
-  const data = JSON.parse(raw);
 
-  const valid = await verifySignature(raw, headers);
-  if (!valid) {
-    console.error('Invalid signature for event', data.id);
-    return res.sendStatus(400);
+app.post(LISTEN_PATH, express.raw({ type: "application/json" }), async (request, response) => {
+  const headers = request.headers;
+  const event = request.body.toString(); // raw body as string
+  const data = JSON.parse(event);
+
+  console.log(`headers`, headers);
+  console.log(`parsed json`, JSON.stringify(data, null, 2));
+  console.log(`raw event: ${event}`);
+
+  const isSignatureValid = await verifySignature(event, headers);
+
+  if (isSignatureValid) {
+    console.log("Signature is valid.");
+
+    // Process webhook data here
+    console.log("Received event", JSON.stringify(data, null, 2));
+  } else {
+    console.log(`Signature is not valid for ${data?.id} ${headers?.["correlation-id"]}`);
   }
-  console.log('✔️ Signature valid, processing event', data.id);
-  // TODO: handle event
-  res.sendStatus(200);
+
+  response.sendStatus(200);
 });
 
-async function verifySignature(rawEvent, headers) {
-  const id = headers['paypal-transmission-id'];
-  const time = headers['paypal-transmission-time'];
-  const crc = parseInt("0x" + crc32(rawEvent).toString('hex'));
-  const message = `${id}|${time}|${WEBHOOK_ID}|${crc}`;
-  console.log('Signed message:', message);
-  const cert = await downloadAndCache(headers['paypal-cert-url']);
-  const sig = Buffer.from(headers['paypal-transmission-sig'], 'base64');
-  const verifier = crypto.createVerify('SHA256');
+async function verifySignature(event, headers) {
+  const transmissionId = headers["paypal-transmission-id"];
+  const timeStamp = headers["paypal-transmission-time"];
+  // Use crc32 from 'crc' - it returns a number
+  const crc = crc32(event);
+
+  const message = `${transmissionId}|${timeStamp}|${WEBHOOK_ID}|${crc}`;
+  console.log(`Original signed message: ${message}`);
+
+  const certPem = await downloadAndCache(headers["paypal-cert-url"]);
+
+  // Base64 signature buffer
+  const signatureBuffer = Buffer.from(headers["paypal-transmission-sig"], "base64");
+
+  const verifier = crypto.createVerify("SHA256");
   verifier.update(message);
-  return verifier.verify(cert, sig);
+
+  return verifier.verify(certPem, signatureBuffer);
 }
 
-app.listen(LISTEN_PORT, () => console.log(`Listening on port ${LISTEN_PORT}`));
+app.listen(LISTEN_PORT, () => {
+  console.log(`Node server listening at http://localhost:${LISTEN_PORT}/`);
+});
