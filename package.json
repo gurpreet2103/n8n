@@ -1,15 +1,18 @@
 {
   "name": "paypal-webhook-verifier",
   "version": "1.0.0",
+  "description": "A Node.js app to verify PayPal webhook signatures",
   "type": "module",
-  "main": "server.js",
   "scripts": {
     "start": "node server.js"
   },
   "dependencies": {
-    "dotenv": "16.3.1",
-    "axios": "1.6.7",
-    "express": "4.18.2",
-    "crc": "4.3.2"
+    "crc": "^4.1.1",
+    "dotenv": "^16.0.3",
+    "express": "^4.18.2",
+    "node-fetch": "^3.3.1"
+  },
+  "engines": {
+    "node": ">=18.0.0"
   }
 }
