@@ -15,7 +15,7 @@ app.use(express.json({
   }
 }));
 
-app.post('/', async (req, res) => {
+app.post('/webhook', async (req, res) => {
   console.log('headers', req.headers);
   console.log('parsed json', req.body);
 
